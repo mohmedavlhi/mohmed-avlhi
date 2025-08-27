@@ -1,0 +1,280 @@
+--// Misaa ESP (BillboardGui-based)
+--// Drop this as a LocalScript in StarterPlayerScripts (or run in a client context).
+--// No exploits required; uses Roblox UI instances. Tested against standard APIs.
+
+-- ============ CONFIG ============
+local CONFIG = {
+    PlayerTagText = "Misaa",    -- what to display above players
+    TextSize = 20,              -- default text size (increase for "code size more")
+    PlayerTagColor = Color3.fromRGB(255, 75, 200),
+    BookTagColor   = Color3.fromRGB(80, 255, 120),
+    OutlineColor   = Color3.fromRGB(0, 0, 0),
+    Transparency   = 0.0,       -- 0 = opaque label background
+    AlwaysFaceCamera = true,    -- BillboardGui always faces the camera
+    OffsetStuds = Vector3.new(0, 3, 0), -- label offset above the head/root
+    ToggleKey = Enum.KeyCode.Insert,    -- open/close ESP
+    UnloadKey = Enum.KeyCode.Delete,    -- fully unload/clean up the script
+    TagOnlyLocalPlayer = false, -- if true, only the local player shows "Misaa" tag; others show their name
+    ScanForBooksEverySec = 2,   -- rescan interval for Book objects
+}
+-- =================================
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+
+local state = {
+    enabled = true,
+    conns = {},
+    playerTags = {}, -- [character] = BillboardGui
+    bookTags = {},   -- [Instance] = BillboardGui
+    heartbeatConn = nil,
+    bookScanLoop = nil,
+}
+
+local function safeDisconnect(conn)
+    if conn then
+        pcall(function() conn:Disconnect() end)
+    end
+end
+
+local function cleanupBillboard(gui)
+    if gui and gui.Destroy then
+        pcall(function() gui:Destroy() end)
+    end
+end
+
+local function makeBillboard(parentPart, text, textColor)
+    if not parentPart or not parentPart.Parent then return nil end
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "MisaaESP"
+    billboard.Size = UDim2.new(0, 200, 0, 50)
+    billboard.StudsOffset = CONFIG.OffsetStuds
+    billboard.AlwaysOnTop = true
+    billboard.LightInfluence = 0
+    billboard.MaxDistance = 10000
+    billboard.Active = false
+    billboard.Enabled = state.enabled
+    billboard.Adornee = parentPart
+    billboard.ResetOnSpawn = false
+
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Name = "Tag"
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.BackgroundTransparency = 1 - (1 - CONFIG.Transparency)
+    textLabel.TextTransparency = CONFIG.Transparency
+    textLabel.Text = text
+    textLabel.TextSize = CONFIG.TextSize
+    textLabel.Font = Enum.Font.GothamBold
+    textLabel.RichText = true
+    textLabel.TextColor3 = textColor or Color3.new(1,1,1)
+    textLabel.TextStrokeTransparency = 0
+    textLabel.TextStrokeColor3 = CONFIG.OutlineColor
+    textLabel.TextScaled = false
+    textLabel.BorderSizePixel = 0
+    textLabel.Parent = billboard
+
+    billboard.Parent = parentPart
+
+    return billboard
+end
+
+local function getAdorneeFromCharacter(character)
+    if not character then return nil end
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if hrp then return hrp end
+    local head = character:FindFirstChild("Head")
+    if head then return head end
+    return nil
+end
+
+local function tagCharacter(player, character)
+    if not character or not player then return end
+    -- clean prior tag
+    if state.playerTags[character] then
+        cleanupBillboard(state.playerTags[character])
+        state.playerTags[character] = nil
+    end
+
+    local adornee = getAdorneeFromCharacter(character)
+    if not adornee then
+        -- wait for parts
+        local conn
+        conn = character.ChildAdded:Connect(function(child)
+            if child.Name == "HumanoidRootPart" or child.Name == "Head" then
+                safeDisconnect(conn)
+                tagCharacter(player, character)
+            end
+        end)
+        table.insert(state.conns, conn)
+        return
+    end
+
+    local labelText
+    if CONFIG.TagOnlyLocalPlayer then
+        labelText = (player == LocalPlayer) and CONFIG.PlayerTagText or player.DisplayName
+    else
+        labelText = CONFIG.PlayerTagText
+    end
+
+    local color = CONFIG.PlayerTagColor
+    local gui = makeBillboard(adornee, labelText, color)
+    if not gui then return end
+    state.playerTags[character] = gui
+
+    -- keep billboard enabled state synced
+    local function sync()
+        if gui then
+            gui.Enabled = state.enabled
+            local textLabel = gui:FindFirstChild("Tag")
+            if textLabel then
+                textLabel.TextSize = CONFIG.TextSize
+            end
+        end
+    end
+    sync()
+end
+
+local function onCharacterAdded(player, character)
+    tagCharacter(player, character)
+    local conn = character.AncestryChanged:Connect(function(_, parent)
+        if not parent then
+            -- character removed, clean its tag
+            if state.playerTags[character] then
+                cleanupBillboard(state.playerTags[character])
+                state.playerTags[character] = nil
+            end
+        end
+    end)
+    table.insert(state.conns, conn)
+end
+
+local function initPlayers()
+    -- Existing players
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr.Character then
+            onCharacterAdded(plr, plr.Character)
+        end
+        local cconn = plr.CharacterAdded:Connect(function(char) onCharacterAdded(plr, char) end)
+        table.insert(state.conns, cconn)
+    end
+
+    local aconn = Players.PlayerAdded:Connect(function(plr)
+        local cconn = plr.CharacterAdded:Connect(function(char) onCharacterAdded(plr, char) end)
+        table.insert(state.conns, cconn)
+        if plr.Character then
+            onCharacterAdded(plr, plr.Character)
+        end
+    end)
+    table.insert(state.conns, aconn)
+
+    local rconn = Players.PlayerRemoving:Connect(function(plr)
+        if plr.Character and state.playerTags[plr.Character] then
+            cleanupBillboard(state.playerTags[plr.Character])
+            state.playerTags[plr.Character] = nil
+        end
+    end)
+    table.insert(state.conns, rconn)
+end
+
+local function tagBookInstance(inst)
+    if not inst then return end
+    if state.bookTags[inst] then return end
+    local adornee = inst:IsA("BasePart") and inst or inst:FindFirstChildWhichIsA("BasePart", true)
+    if not adornee then return end
+
+    local gui = makeBillboard(adornee, "Book", CONFIG.BookTagColor)
+    if not gui then return end
+    state.bookTags[inst] = gui
+
+    local conn = inst.AncestryChanged:Connect(function(_, parent)
+        if not parent then
+            if state.bookTags[inst] then
+                cleanupBillboard(state.bookTags[inst])
+                state.bookTags[inst] = nil
+            end
+        end
+    end)
+    table.insert(state.conns, conn)
+end
+
+local function scanForBooks()
+    for inst, _ in pairs(state.bookTags) do
+        if not inst or not inst.Parent then
+            cleanupBillboard(state.bookTags[inst])
+            state.bookTags[inst] = nil
+        end
+    end
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if obj.Name == "Book" then
+            tagBookInstance(obj)
+        end
+    end
+end
+
+local function startBookScanner()
+    if state.bookScanLoop then return end
+    state.bookScanLoop = task.spawn(function()
+        while true do
+            scanForBooks()
+            task.wait(CONFIG.ScanForBooksEverySec)
+        end
+    end)
+end
+
+local function toggleEnabled()
+    state.enabled = not state.enabled
+    -- sync all billboards
+    for _, gui in pairs(state.playerTags) do
+        if gui then gui.Enabled = state.enabled end
+    end
+    for _, gui in pairs(state.bookTags) do
+        if gui then gui.Enabled = state.enabled end
+    end
+end
+
+local function unload()
+    -- disconnect all connections
+    for _, c in ipairs(state.conns) do safeDisconnect(c) end
+    state.conns = {}
+
+    -- destroy all billboards
+    for char, gui in pairs(state.playerTags) do
+        cleanupBillboard(gui)
+        state.playerTags[char] = nil
+    end
+    for inst, gui in pairs(state.bookTags) do
+        cleanupBillboard(gui)
+        state.bookTags[inst] = nil
+    end
+
+    if state.heartbeatConn then safeDisconnect(state.heartbeatConn) end
+    state.heartbeatConn = nil
+
+    -- stop book loop
+    state.bookScanLoop = nil
+
+    print("[Misaa ESP] Unloaded")
+end
+
+local function bindInputs()
+    local ibegan = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.KeyCode == CONFIG.ToggleKey then
+            toggleEnabled()
+            print("[Misaa ESP] Toggled to", state.enabled)
+        elseif input.KeyCode == CONFIG.UnloadKey then
+            unload()
+        end
+    end)
+    table.insert(state.conns, ibegan)
+end
+
+-- Boot
+initPlayers()
+startBookScanner()
+bindInputs()
+print("[Misaa ESP] Loaded. Insert=toggle, Delete=unload")
